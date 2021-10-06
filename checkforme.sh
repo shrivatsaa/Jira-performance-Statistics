@@ -59,7 +59,7 @@ printf $combo'Running Disk speed checks..\n'$white
 #Checking disk speed using timeToAddMillis in the cache replication stats (ideally should be ~ 1ms)
 printf $green'Looking at local disk speed using cache replication stats timeToAddMillis. Output on graph titled DiskWriteSpeed.\n'$white 
 printf $cyan'Ideally should be around 1ms........\n\n'$white 
-grep -h "$checkdate.*Cache replication queue stats per node:" $ApplogPath/atlassian-jira.log* | grep total | awk '{print $17}' | jq '. | [.timestampMillis, .timeToAddMillis.avg] | @csv' | sed 's/"//g' | gawk -F "," '{print strftime("%Y-%m-%d %H:%M:%S",substr($1,1,10)),$2}' | awk '{print $2,$3}' | sort -nk1,2 > $ApplogPath/PlotDiskWriteSpeed
+grep -h "$checkdate.*Cache replication queue stats per node.*total" $ApplogPath/atlassian-jira.log* | awk '{for(i=1;i<=NF;i++)if ($i ~ /timeToAddMillis/){print $i}}' | jq '. | [.timestampMillis, .timeToAddMillis.avg] | @csv' | sed 's/"//g' | gawk -F "," '{print strftime("%Y-%m-%d %H:%M:%S",substr($1,1,10)),$2}' | awk '{print $2,$3}' | sort -nk1,2 > $ApplogPath/PlotDiskWriteSpeed
 #Exit if there are no data for the current date.
 if [[ $(wc -l < $ApplogPath/PlotDiskWriteSpeed) -eq 0 ]] ; then {
   echo $red'No statistics logged for the date for cache replication. Exiting. Please rerun the script with a specific date in the past after checking the logs\n'$white
@@ -74,7 +74,7 @@ PlotGraphs
 printf $combo'Running DB performance speed checks..\n'$white 
 
 #Check DB performance using getIssueVersionMillis to read from the database(ideally should be < 5ms)
-printf $green'Looking at Index writer stats that conditionally updates index on local disk with index changes. Output on graph titled DBReadSpeed.\n'$white
+printf $green'Looking at Index writer stats that reads index on local disk with index changes. Output on graph titled DBReadSpeed.\n'$white
 printf $cyan'Measures DB read speed and should be ideally be less than 5ms.....\n\n'$white 
 grep -h "$checkdate.*versioning-stats-0.*total" $ApplogPath/atlassian-jira.log* | awk '{printf "%s ",$2;{for(i=1;i<=NF;i++)if ($i ~ /getIssueVersionMillis/){print $i}}}' | sed 's/,$//g' | awk '{printf "%s ",substr($1,1,8);print $2| "jq .getIssueVersionMillis.avg";close("jq .getIssueVersionMillis.avg")}' | sort -nk1 > $ApplogPath/PlotDBReadSpeed
 Filename=$(pwd)/$ApplogPath/PlotDBReadSpeed;
@@ -127,10 +127,32 @@ PlotGraphs
 #------------------------------------------------------------
 printf $combo'Running DBR and DBR efficiency checks....\n'$white 
 
+
+printf $green'Looking at Time to process and time to update index from the index replication stats run every 5 minutes.\n'$white
+printf $cyan'Time to process the batch and update the index should be both under 5 seconds .....\n\n'$white 
+grep -h "$checkdate.*NodeReindexServiceThread.*INFO.*INDEX-REPLAY.*total" $ApplogPath/atlassian-jira.log* | awk '{print $2,$15,$16}' | while read line; do printf "%s %s\n" "$(echo $line | awk '{print substr($1,1,8)}')" "$(echo $line |awk '{print $2,$3}' | jq -r ".|[.timeInMillis.avg,.updateIndexInMillis.ISSUE.avg] | @tsv" | awk '{printf "%s %s",$1/100,$2/100}')";done | sort -k1,2 > $ApplogPath/PlotIndexTimeStat
+Filename=$(pwd)/$ApplogPath/PlotIndexTimeStat
+
+for FILE in $(ls $Filename); do
+    gnuplot -persist <<- EOF
+        set term qt font "Arial,12"
+        set xdata time
+        set timefmt "%H:%M:%S"
+        set format x "%H:%M"
+        set xlabel "Time"
+        set ylabel "Sec"
+        set title "Index Replication Time"
+        set grid
+        set autoscale
+        plot "${FILE}" using 1:2 title "timeInMillis <= 5s" with lines, "${FILE}" using 1:3 title "updateIndexInMillis <= 5s" with lines
+
+EOF
+done
+
 #Check Document based replication related statistics
 printf $green'Looking at Index writer stats that logs the indexes that were handled by DBR. Output on graph titled PlotDBRStat.\n'$white
 printf $cyan'Measures DBR efficiency and should be ideally be more than 90 percent .....\n\n'$white 
-grep -h "$checkdate.*NodeReindexServiceThread.*INFO.*INDEX-REPLAY.*total" $ApplogPath/atlassian-jira.log* | awk '{print $2,$15,$16}' | while read line; do printf "%s %s\n" "$(echo $line | awk '{print substr($1,1,8)}')" "$(echo $line |awk '{print $2,$3}' | jq -r ".|[.timeInMillis.avg,.updateIndexInMillis.ISSUE.avg,.filterOutAlreadyIndexedBeforeCounter.ISSUE.sum,.filterOutAlreadyIndexedAfterCounter.ISSUE.sum] | @tsv" | awk '{if ($3=="") {$3=1;$4=1}}{printf "%s %s %s",$1/100,$2/100,(1-($4/$3))*100}')";done | sort -k1,2 > $ApplogPath/PlotDBRStat
+grep -h "$checkdate.*NodeReindexServiceThread.*INFO.*INDEX-REPLAY.*total" $ApplogPath/atlassian-jira.log* | awk '{print $2,$15,$16}' | while read line; do printf "%s %s\n" "$(echo $line | awk '{print substr($1,1,8)}')" "$(echo $line |awk '{print $2,$3}' | jq -r ".|[.filterOutAlreadyIndexedBeforeCounter.ISSUE.sum,.filterOutAlreadyIndexedAfterCounter.ISSUE.sum] | @tsv" | awk '{if ($1=="") {$1=1;$2=1}}{printf "%s",(1-($2/$1))*100}')";done | sort -k1,2 > $ApplogPath/PlotDBRStat
 header="DBR Efficiency >= 90";
 Filename=$(pwd)/$ApplogPath/PlotDBRStat
 
@@ -150,24 +172,6 @@ for FILE in $(ls $Filename); do
 EOF
 done
 
-printf $green'Looking at Time to process and time to update index from the index replication stats run every 5 minutes.\n'$white
-printf $cyan'Time to process the batch and update the index should be both under 5 seconds .....\n\n'$white 
-
-for FILE in $(ls $Filename); do
-    gnuplot -persist <<- EOF
-        set term qt font "Arial,12"
-        set xdata time
-        set timefmt "%H:%M:%S"
-        set format x "%H:%M"
-        set xlabel "Time"
-        set ylabel "Sec"
-        set title "Index Replication Time"
-        set grid
-        set autoscale
-        plot "${FILE}" using 1:2 title "timeInMillis <= 5s" with lines, "${FILE}" using 1:3 title "updateIndexInMillis <= 5s" with lines
-
-EOF
-done
 }
 
 CheckDBRstat
